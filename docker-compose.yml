@@ -1,0 +1,116 @@
+# CompreFácil — serviços de pagamento e notificação
+#
+#   docker compose up --build          sobe tudo (infraestrutura + os dois serviços)
+#   docker compose up -d rabbitmq postgres-pagamento postgres-notificacao mailpit
+#                                      sobe só a infraestrutura (para rodar os serviços com npm)
+#
+# Cada serviço tem o seu próprio banco PostgreSQL e não há dependência entre
+# ms-pagamento e ms-notificacao: eles só conversam por mensagens no RabbitMQ.
+
+name: comprefacil
+
+services:
+  # ---------------------------------------------------------------- mensageria
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: comprefacil
+      RABBITMQ_DEFAULT_PASS: comprefacil
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # painel de administração: http://localhost:15672
+    volumes:
+      - rabbitmq-dados:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------- bancos de dados
+  postgres-pagamento:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: pagamentos
+      POSTGRES_USER: pagamento
+      POSTGRES_PASSWORD: pagamento
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-pagamento-dados:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pagamento -d pagamentos"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  postgres-notificacao:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: notificacoes
+      POSTGRES_USER: notificacao
+      POSTGRES_PASSWORD: notificacao
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres-notificacao-dados:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notificacao -d notificacoes"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ------------------------------------------- servidor de e-mail de testes
+  # Recebe os e-mails do serviço de notificação e mostra em http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"     # caixa de entrada (web)
+      - "1025:1025"     # SMTP
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ microsserviços
+  ms-pagamento:
+    build: ./ms-pagamento
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://pagamento:pagamento@postgres-pagamento:5432/pagamentos
+      RABBITMQ_URL: amqp://comprefacil:comprefacil@rabbitmq:5672
+      PROCESSAMENTO_DELAY_MS: 3000
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres-pagamento:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ms-notificacao:
+    build: ./ms-notificacao
+    environment:
+      PORT: 3002
+      DATABASE_URL: postgres://notificacao:notificacao@postgres-notificacao:5432/notificacoes
+      RABBITMQ_URL: amqp://comprefacil:comprefacil@rabbitmq:5672
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres-notificacao:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  rabbitmq-dados:
+  postgres-pagamento-dados:
+  postgres-notificacao-dados:
